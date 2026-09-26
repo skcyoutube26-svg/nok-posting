@@ -8,5 +8,6 @@ jobs:
       - env:
           IG_TOKEN: ${{ secrets.IG_TOKEN }}
         run: |
+          echo "token length ${#IG_TOKEN}, starts ${IG_TOKEN:0:4}, has spaces: $([[ $IG_TOKEN =~ [[:space:]] ]] && echo yes || echo no)"
           curl -s "https://graph.instagram.com/me?fields=username,account_type,user_id&access_token=$IG_TOKEN"; echo
           curl -s "https://graph.instagram.com/me/content_publishing_limit?fields=quota_usage,config&access_token=$IG_TOKEN"; echo
