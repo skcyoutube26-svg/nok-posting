@@ -8,5 +8,5 @@ jobs:
       - env:
           IG_TOKEN: ${{ secrets.IG_TOKEN }}
         run: |
-          curl -sf "https://graph.instagram.com/me?fields=username,account_type,user_id&access_token=$IG_TOKEN"; echo
-          curl -sf "https://graph.instagram.com/me/content_publishing_limit?fields=quota_usage,config&access_token=$IG_TOKEN"; echo
+          curl -s "https://graph.instagram.com/me?fields=username,account_type,user_id&access_token=$IG_TOKEN"; echo
+          curl -s "https://graph.instagram.com/me/content_publishing_limit?fields=quota_usage,config&access_token=$IG_TOKEN"; echo
