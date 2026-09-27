@@ -11,6 +11,7 @@ jobs:
   publish:
     if: github.event.schedule != '0 3 * * 1'
     runs-on: ubuntu-latest
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
       - name: Publish due posts

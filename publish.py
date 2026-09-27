@@ -63,8 +63,30 @@ def publish(post):
     return mid, ai
 
 
+WAIT_MAX = 5.5 * 3600  # GitHub's cron fires hours apart, so a run waits for posts due within this window (job limit 6 h)
+
+
+def next_due():
+    times = [datetime.fromisoformat(json.loads(f.read_text(encoding="utf-8"))["publish_at"].replace("Z", "+00:00"))
+             for f in (ROOT / "queue").glob("*.json")]
+    future = [t for t in times if t > datetime.now(timezone.utc)]
+    return min(future) if future else None
+
+
 def main():
     dry = "--dry" in sys.argv
+    failed = run_due(dry)
+    while not dry and (nxt := next_due()) is not None:
+        wait = (nxt - datetime.now(timezone.utc)).total_seconds()
+        if wait > WAIT_MAX:
+            break
+        print(f"WAIT {int(wait)} s for the post due {nxt.isoformat()}", flush=True)
+        time.sleep(wait + 5)
+        failed |= run_due(dry)
+    sys.exit(1 if failed else 0)
+
+
+def run_due(dry):
     now = datetime.now(timezone.utc)
     failed = False
     for f in sorted((ROOT / "queue").glob("*.json")):
@@ -87,8 +109,8 @@ def main():
         (ROOT / "done" / f.name).write_text(json.dumps(post, indent=1, ensure_ascii=False), encoding="utf-8")
         f.unlink()
         (ROOT / post["file"]).unlink(missing_ok=True)
-        print(f"POSTED {f.name}: {post['permalink']} ai_label={post['is_ai_generated']}")
-    sys.exit(1 if failed else 0)
+        print(f"POSTED {f.name}: {post['permalink']} ai_label={post['is_ai_generated']}", flush=True)
+    return failed
 
 
 if __name__ == "__main__":
