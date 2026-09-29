@@ -36,6 +36,8 @@ def container_params(post, url):
             p["alt_text"] = post["alt_text"]  # image feed posts only (Meta)
     elif kind == "REELS":
         p.update(media_type="REELS", video_url=url, caption=post.get("caption", ""), share_to_feed="true")
+        if post.get("thumb_offset_ms"):
+            p["thumb_offset"] = str(post["thumb_offset_ms"])  # cover frame
     elif kind == "STORIES":
         p.update(media_type="STORIES", **({"video_url": url} if url.endswith(".mp4") else {"image_url": url}))
     else:
