@@ -1,0 +1,18 @@
+name: stats
+# Read-only numbers. The repo and its logs are public, so the output is encrypted to a key kept off GitHub.
+on: workflow_dispatch
+jobs:
+  stats:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          IG_TOKEN: ${{ secrets.IG_TOKEN }}
+          PAGES_BASE: https://example.invalid/
+        run: |
+          python stats.py > s.json
+          openssl rand -hex 32 > k
+          openssl enc -aes-256-cbc -pbkdf2 -in s.json -out s.enc -pass file:k
+          openssl pkeyutl -encrypt -pubin -inkey stats-pub.pem -in k -out k.enc
+          echo "KEY:$(base64 -w0 k.enc)"
+          echo "DATA:$(base64 -w0 s.enc)"
