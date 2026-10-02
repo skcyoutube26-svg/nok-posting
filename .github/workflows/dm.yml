@@ -14,4 +14,4 @@ jobs:
       - uses: actions/checkout@v4
       - env:
           IG_TOKEN: ${{ secrets.IG_TOKEN }}
-        run: python dm.py --${{ github.event.inputs.mode }}
+        run: if [ "${{ github.event.inputs.mode }}" = cleanup ]; then python cleanup.py; else python dm.py --${{ github.event.inputs.mode }}; fi
