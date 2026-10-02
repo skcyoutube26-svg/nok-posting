@@ -29,11 +29,16 @@ def gemini(prompt):
     return json.loads(text)
 
 
+OURS = set()  # texts of our own earlier replies (the API does not return usernames on replies)
+
+
 def manual(dry):
+    OURS.update(i["reply"] for i in json.load(open("manual-replies.json", encoding="utf-8")))
     """Post owner-reviewed replies from manual-replies.json (media_id, exact comment text, reply); skips comments already answered."""
-    for item in json.load(open("manual-replies.json", encoding="utf-8")):
+    src = sys.argv[sys.argv.index("--file") + 1] if "--file" in sys.argv else "manual-replies.json"
+    for item in json.load(open(src, encoding="utf-8")):
         for c in call("GET", f"{item['media_id']}/comments", fields="id,text,username,replies{id,username}").get("data", []):
-            mine = [r for r in c.get("replies", {}).get("data", []) if r.get("username") == ME]
+            mine = [r for r in call("GET", f"{c['id']}/replies", fields="id,text").get("data", []) if r.get("text") in OURS]
             if c.get("text") == item["comment"] and (item.get("replace") or not mine):
                 if not dry:
                     for r in mine if item.get("replace") else []:

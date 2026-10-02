@@ -8,6 +8,9 @@ on:
       dry:
         description: preview only
         default: "no"
+      file:
+        description: replies file for manual mode
+        default: ""
       manual:
         description: post manual-replies.json instead of auto replies
         default: "no"
@@ -20,4 +23,4 @@ jobs:
       - env:
           IG_TOKEN: ${{ secrets.IG_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python replies.py ${{ github.event.inputs.dry == 'yes' && '--dry' || '' }} ${{ github.event.inputs.manual == 'yes' && '--manual' || '' }}
+        run: python replies.py ${{ github.event.inputs.dry == 'yes' && '--dry' || '' }} ${{ github.event.inputs.manual == 'yes' && '--manual' || '' }} ${{ github.event.inputs.file && format('--file {0}', github.event.inputs.file) || '' }}
