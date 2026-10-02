@@ -8,4 +8,4 @@ for item in json.load(open("manual-replies.json", encoding="utf-8")):
             if r.get("text") in OLD:
                 call("DELETE", r["id"]); print("DELETED reply", r["id"])
             else:
-                print("KEPT reply", r["id"], (r.get("username") or (r.get("from") or {}).get("username")))
+                print("KEPT reply", r["id"], repr(r.get("text"))[:70])
