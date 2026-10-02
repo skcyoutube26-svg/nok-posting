@@ -29,6 +29,9 @@ def gemini(prompt):
 
 def main():
     dry = "--dry" in sys.argv
+    if not os.environ.get("GEMINI_API_KEY"):
+        print("GEMINI_API_KEY not set yet; nothing to do")  # owner runs set-gemini-key after the token gets the comments permission
+        return
     since = datetime.now(timezone.utc) - timedelta(days=10)
     done = 0
     for m in call("GET", "me/media", fields="id,caption,timestamp", limit="15").get("data", []):
