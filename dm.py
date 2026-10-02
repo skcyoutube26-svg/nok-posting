@@ -16,8 +16,9 @@ if "--test" in sys.argv:
 
 if "--private" in sys.argv:
     uid = me()
-    for item in json.load(open("manual-replies.json", encoding="utf-8")):
-        if "DM" not in item["reply"]:
+    src = sys.argv[sys.argv.index("--file") + 1] if "--file" in sys.argv else "manual-replies.json"
+    for item in json.load(open(src, encoding="utf-8")):
+        if "DM" not in item["reply"] and not item["reply"].startswith("Sending"):
             continue
         link = call("GET", item["media_id"], fields="permalink")["permalink"]
         for c in call("GET", f"{item['media_id']}/comments", fields="id,text").get("data", []):
