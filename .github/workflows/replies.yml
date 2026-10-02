@@ -11,10 +11,18 @@ on:
       file:
         description: replies file for manual mode
         default: ""
+      sample:
+        description: print replies to made-up comments (posts nothing)
+        default: "no"
+      seed:
+        description: mark all existing comments answered (no replies)
+        default: "no"
       manual:
         description: post manual-replies.json instead of auto replies
         default: "no"
 concurrency: replies
+permissions:
+  contents: write
 jobs:
   replies:
     runs-on: ubuntu-latest
@@ -23,4 +31,8 @@ jobs:
       - env:
           IG_TOKEN: ${{ secrets.IG_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python replies.py ${{ github.event.inputs.dry == 'yes' && '--dry' || '' }} ${{ github.event.inputs.manual == 'yes' && '--manual' || '' }} ${{ github.event.inputs.file && format('--file {0}', github.event.inputs.file) || '' }}
+        run: python replies.py ${{ github.event.inputs.dry == 'yes' && '--dry' || '' }} ${{ github.event.inputs.seed == 'yes' && '--seed' || '' }} ${{ github.event.inputs.sample == 'yes' && '--sample' || '' }} ${{ github.event.inputs.manual == 'yes' && '--manual' || '' }} ${{ github.event.inputs.file && format('--file {0}', github.event.inputs.file) || '' }}
+      - name: keep answered ids
+        run: |
+          git config user.name nok-bot; git config user.email nok-bot@users.noreply.github.com
+          git add answered.json 2>/dev/null && git commit -qm "replies: answered ids" && git push -q || true
