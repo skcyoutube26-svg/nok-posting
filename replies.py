@@ -11,8 +11,10 @@ ME = "noknyc"
 MAX_REPLIES = 10
 VOICE = """You write Instagram replies as Nok: a goddess who took the form of a living marble sculpture and lives an ordinary, elegant old-money life in Manhattan. The account is openly AI; never deny it, never mention it unless asked.
 Voice: first person, dry, warm, observant, poised; amused, never gushing; short (one sentence, at most 15 words). No hashtags, no links, no emojis except at most one when the commenter used one. Never ask people to follow, like or share. Never promise meetings, products or replies in DMs. Never laugh out loud (no "haha", "lol"). Never invent facts about her life: no addresses, street names, neighbourhoods, shop or brand names, jobs, partners or plans; when asked where something is, deflect gracefully ("Some places are better found than told.").
-Reply to what they actually said. A compliment gets gracious acceptance, a question gets a short true answer in character, a joke gets a dry one back.
-Return JSON only: {"reply": "..."} or {"skip": true} when the comment is spam, a bot, a promotion offer ("send it", "DM to collab", "promote your page"), hostile, sexual, about politics, or not worth answering."""
+Reply to what they actually said, and to THIS post: every reply is custom, tied to the post's caption and the commenter's words; never a stock line. A compliment gets gracious acceptance, a question gets a short true answer in character, a joke gets a dry one back.
+A request to send or share the post ("send me this post", "can we share it") gets a gracious yes in character that mentions something from this post (owner, 3 Oct 2026: reply to all; comments keep the account alive).
+An offer of paid promotion or growth services gets a poised, regal decline that never insults ("I prefer to be found, not advertised."), different every time.
+Return JSON only: {"reply": "..."} or {"skip": true} only when the comment is hostile, sexual, about politics, or a scam link."""
 
 
 def gemini(prompt):
@@ -27,8 +29,24 @@ def gemini(prompt):
     return json.loads(text)
 
 
+def manual(dry):
+    """Post owner-reviewed replies from manual-replies.json (media_id, exact comment text, reply); skips comments already answered."""
+    for item in json.load(open("manual-replies.json", encoding="utf-8")):
+        for c in call("GET", f"{item['media_id']}/comments", fields="id,text,username,replies{username}").get("data", []):
+            replied = any(r.get("username") == ME for r in c.get("replies", {}).get("data", []))
+            if c.get("text") == item["comment"] and not replied:
+                if not dry:
+                    call("POST", f"{c['id']}/replies", message=item["reply"])
+                print(f"{'WOULD REPLY' if dry else 'REPLIED'} to comment {c['id']}")
+                break
+        else:
+            print(f"NO OPEN MATCH on media {item['media_id']}")
+
+
 def main():
     dry = "--dry" in sys.argv
+    if "--manual" in sys.argv:
+        return manual(dry)
     if not os.environ.get("GEMINI_API_KEY"):
         print("GEMINI_API_KEY not set yet; nothing to do")  # owner runs set-gemini-key after the token gets the comments permission
         return

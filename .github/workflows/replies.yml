@@ -8,6 +8,9 @@ on:
       dry:
         description: preview only
         default: "no"
+      manual:
+        description: post manual-replies.json instead of auto replies
+        default: "no"
 concurrency: replies
 jobs:
   replies:
@@ -17,4 +20,4 @@ jobs:
       - env:
           IG_TOKEN: ${{ secrets.IG_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python replies.py ${{ github.event.inputs.dry == 'yes' && '--dry' || '' }}
+        run: python replies.py ${{ github.event.inputs.dry == 'yes' && '--dry' || '' }} ${{ github.event.inputs.manual == 'yes' && '--manual' || '' }}
