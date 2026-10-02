@@ -15,5 +15,9 @@ for m in call("GET", "me/media", fields=url_fields, limit="50").get("data", []):
     except RuntimeError as e:
         ins = {"error": str(e)[:200]}
     m["caption"] = (m.get("caption") or "")[:60]
+    try:
+        m["comments_list"] = [[c.get("username"), (c.get("text") or "")[:120]] for c in call("GET", f"{m['id']}/comments", fields="text,username").get("data", [])]
+    except RuntimeError as e:
+        m["comments_list"] = str(e)[:120]
     posts.append({**m, **ins})
 print(json.dumps({"account": me, "posts": posts}, ensure_ascii=False))
