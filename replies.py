@@ -32,10 +32,12 @@ def gemini(prompt):
 def manual(dry):
     """Post owner-reviewed replies from manual-replies.json (media_id, exact comment text, reply); skips comments already answered."""
     for item in json.load(open("manual-replies.json", encoding="utf-8")):
-        for c in call("GET", f"{item['media_id']}/comments", fields="id,text,username,replies{username}").get("data", []):
-            replied = any(r.get("username") == ME for r in c.get("replies", {}).get("data", []))
-            if c.get("text") == item["comment"] and not replied:
+        for c in call("GET", f"{item['media_id']}/comments", fields="id,text,username,replies{id,username}").get("data", []):
+            mine = [r for r in c.get("replies", {}).get("data", []) if r.get("username") == ME]
+            if c.get("text") == item["comment"] and (item.get("replace") or not mine):
                 if not dry:
+                    for r in mine if item.get("replace") else []:
+                        call("DELETE", r["id"])  # replace an earlier reply of ours
                     call("POST", f"{c['id']}/replies", message=item["reply"])
                 print(f"{'WOULD REPLY' if dry else 'REPLIED'} to comment {c['id']}")
                 break

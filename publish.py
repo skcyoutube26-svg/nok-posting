@@ -19,7 +19,7 @@ def call(method, path, **params):
     params["access_token"] = os.environ["IG_TOKEN"]
     data = urllib.parse.urlencode(params).encode()
     url = f"{API}/{path}"
-    req = urllib.request.Request(url, data=data) if method == "POST" else urllib.request.Request(f"{url}?{data.decode()}")
+    req = urllib.request.Request(url, data=data) if method == "POST" else urllib.request.Request(f"{url}?{data.decode()}", method=method)
     try:
         with urllib.request.urlopen(req, timeout=60) as r:
             return json.load(r)
