@@ -1,0 +1,16 @@
+name: replies
+# Nok answers comments under her own posts. Logs show only comment ids, never text (public repo).
+on:
+  schedule:
+    - cron: "17 */2 * * *"   # GitHub fires this every few hours at best
+  workflow_dispatch:
+concurrency: replies
+jobs:
+  replies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          IG_TOKEN: ${{ secrets.IG_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python replies.py
