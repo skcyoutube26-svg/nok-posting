@@ -4,6 +4,10 @@ on:
   schedule:
     - cron: "17 */2 * * *"   # GitHub fires this every few hours at best
   workflow_dispatch:
+    inputs:
+      dry:
+        description: preview only
+        default: "no"
 concurrency: replies
 jobs:
   replies:
@@ -13,4 +17,4 @@ jobs:
       - env:
           IG_TOKEN: ${{ secrets.IG_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python replies.py
+        run: python replies.py ${{ github.event.inputs.dry == 'yes' && '--dry' || '' }}
