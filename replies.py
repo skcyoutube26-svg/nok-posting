@@ -33,19 +33,26 @@ OURS = set()  # texts of our own earlier replies (the API does not return userna
 
 
 def manual(dry):
-    OURS.update(i["reply"] for i in json.load(open("manual-replies.json", encoding="utf-8")))
-    """Post owner-reviewed replies from manual-replies.json (media_id, exact comment text, reply); skips comments already answered."""
+    """Post owner-reviewed replies from a JSON list (media_id, exact comment text, reply[, old]).
+    With "old", our earlier reply with that exact text is deleted first (the API returns no usernames on replies, so match by text)."""
     src = sys.argv[sys.argv.index("--file") + 1] if "--file" in sys.argv else "manual-replies.json"
     for item in json.load(open(src, encoding="utf-8")):
-        for c in call("GET", f"{item['media_id']}/comments", fields="id,text,username,replies{id,username}").get("data", []):
-            mine = [r for r in call("GET", f"{c['id']}/replies", fields="id,text").get("data", []) if r.get("text") in OURS]
-            if c.get("text") == item["comment"] and (item.get("replace") or not mine):
-                if not dry:
-                    for r in mine if item.get("replace") else []:
-                        call("DELETE", r["id"])  # replace an earlier reply of ours
-                    call("POST", f"{c['id']}/replies", message=item["reply"])
-                print(f"{'WOULD REPLY' if dry else 'REPLIED'} to comment {c['id']}")
-                break
+        for c in call("GET", f"{item['media_id']}/comments", fields="id,text").get("data", []):
+            if c.get("text") != item["comment"]:
+                continue
+            existing = call("GET", f"{c['id']}/replies", fields="id,text").get("data", [])
+            texts = [r.get("text") for r in existing]
+            if item.get("old") and item["old"] not in texts:
+                continue  # not the comment we answered with that line; try the next with the same text
+            if item["reply"] in texts:
+                print(f"ALREADY on comment {c['id']}"); break
+            if not dry:
+                for r in existing:
+                    if item.get("old") and r.get("text") == item["old"]:
+                        call("DELETE", r["id"]); print(f"DELETED old reply {r['id']}")
+                call("POST", f"{c['id']}/replies", message=item["reply"])
+            print(f"{'WOULD REPLY' if dry else 'REPLIED'} to comment {c['id']}")
+            break
         else:
             print(f"NO OPEN MATCH on media {item['media_id']}")
 
