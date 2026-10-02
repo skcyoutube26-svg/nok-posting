@@ -1,0 +1,17 @@
+name: dm
+# Nok's DMs. Logs show only ids, never message text (public repo).
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: test or private
+        default: test
+concurrency: dm
+jobs:
+  dm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          IG_TOKEN: ${{ secrets.IG_TOKEN }}
+        run: python dm.py --${{ github.event.inputs.mode }}
