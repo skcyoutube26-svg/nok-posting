@@ -10,3 +10,5 @@ jobs:
         run: |
           curl -s "https://graph.instagram.com/me?fields=username,account_type,user_id&access_token=$IG_TOKEN"; echo
           curl -s "https://graph.instagram.com/me/content_publishing_limit?fields=quota_usage,config&access_token=$IG_TOKEN"; echo
+          M=$(curl -s "https://graph.instagram.com/me/media?fields=id&limit=1&access_token=$IG_TOKEN" | python3 -c "import sys,json;print(json.load(sys.stdin)['data'][0]['id'])")
+          curl -s "https://graph.instagram.com/$M/comments?fields=id&access_token=$IG_TOKEN" | python3 -c "import sys,json;d=json.load(sys.stdin);print('COMMENTS_READ', 'OK' if 'data' in d else d)"
