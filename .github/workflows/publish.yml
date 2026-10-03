@@ -14,6 +14,8 @@ jobs:
     timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main   # the latest queue, not the commit this run was triggered on (posted the rugs Reel twice, 3 Oct)
       - name: Publish due posts
         env:
           IG_TOKEN: ${{ secrets.IG_TOKEN }}

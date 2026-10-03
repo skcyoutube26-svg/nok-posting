@@ -88,6 +88,17 @@ def main():
     sys.exit(1 if failed else 0)
 
 
+def already_live(post):
+    """True when a post with this caption went live in the last 12 h (two overlapping runs once posted the rugs Reel twice)."""
+    cap = (post.get("caption") or "").strip()
+    since = datetime.now(timezone.utc).timestamp() - 12 * 3600
+    for m in call("GET", "me/media", fields="caption,timestamp", limit="10").get("data", []):
+        when = datetime.fromisoformat(m["timestamp"].replace("+0000", "+00:00")).timestamp()
+        if when >= since and (m.get("caption") or "").strip() == cap:
+            return True
+    return False
+
+
 def run_due(dry):
     now = datetime.now(timezone.utc)
     failed = False
@@ -102,6 +113,10 @@ def run_due(dry):
             print(f"FAIL {f.name}: {post['file']} missing"); failed = True; continue
         if dry:
             print(f"DUE {f.name}: {container_params(post, post['file'])}"); continue
+        if already_live(post):
+            print(f"SKIP {f.name}: the same caption is already live (double-post guard)")
+            (ROOT / "done" / f.name).write_text(json.dumps(post, indent=1, ensure_ascii=False), encoding="utf-8")
+            f.unlink(); continue
         try:
             mid, ai = publish(post)
         except Exception as e:
