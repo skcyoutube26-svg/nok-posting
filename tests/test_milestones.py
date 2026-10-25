@@ -6,7 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from milestones import MILESTONES, WINDOW_HOURS, reel_milestones  # noqa: E402
+from milestones import MILESTONES, WINDOW_HOURS, record_reads, reel_milestones  # noqa: E402
+from milestones_config import MILESTONES_ENABLED  # noqa: E402
 
 NOW = datetime(2026, 11, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -18,6 +19,40 @@ def stamp(hours_ago):
 def reel(hours_ago, **extra):
     return {"id": "r1", "media_product_type": "REELS", "timestamp": stamp(hours_ago),
             "reach": 200, "views": 500, "saved": 10, "shares": 4, **extra}
+
+
+class ReadOnceTests(unittest.TestCase):
+    def test_two_runs_in_one_window_read_once(self):
+        seen = set()
+        first = reel_milestones([reel(25)], NOW, seen)
+        self.assertEqual([e["milestone"] for e in first], ["24h"])
+        record_reads(seen, first)
+        later = NOW + timedelta(hours=6)  # next 6 h run, Reel is now 31 h old, still inside 24..32
+        self.assertEqual(reel_milestones([reel(31)], later, seen), [])
+
+    def test_first_read_in_window_is_the_one_kept(self):
+        seen = set()
+        (a,) = reel_milestones([reel(24.5)], NOW, seen)
+        record_reads(seen, [a])
+        self.assertEqual(a["age_hours"], 24.5)
+        self.assertEqual(reel_milestones([reel(30.5)], NOW, seen), [])
+
+    def test_other_milestones_and_reels_still_read(self):
+        seen = {"r1:24h"}
+        self.assertEqual([e["milestone"] for e in reel_milestones([reel(49)], NOW, seen)], ["48h"])
+        self.assertEqual([e["id"] for e in reel_milestones([reel(25, id="r2")], NOW, seen)], ["r2"])
+
+    def test_error_read_is_not_recorded_so_next_run_can_retry(self):
+        seen = set()
+        err = {"id": "r1", "media_product_type": "REELS", "timestamp": stamp(25), "error": "boom"}
+        record_reads(seen, reel_milestones([err], NOW, seen))
+        self.assertEqual(seen, set())
+        self.assertEqual(len(reel_milestones([reel(31)], NOW, seen)), 1)
+
+    def test_seen_is_not_changed_by_reading(self):
+        seen = set()
+        reel_milestones([reel(25)], NOW, seen)
+        self.assertEqual(seen, set())
 
 
 class MilestoneTests(unittest.TestCase):
@@ -88,7 +123,7 @@ class WiringTests(unittest.TestCase):
     def test_stats_output_keeps_old_keys_and_adds_milestones(self):
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
-            for f in ("stats.py", "milestones.py"):
+            for f in ("stats.py", "milestones.py", "milestones_config.py"):
                 shutil.copy(ROOT / f, d / f)
             (d / "publish.py").write_text(STUB_PUBLISH)
             ago = (datetime.now(timezone.utc) - timedelta(hours=30)).strftime("%Y-%m-%dT%H:%M:%S+0000")  # stats.py reads the real clock
@@ -107,17 +142,26 @@ class WiringTests(unittest.TestCase):
             (e,) = out["reel_milestones"]
             self.assertEqual((e["id"], e["milestone"], e["plays_per_reach"], e["saves_per_reach"], e["shares_per_reach"]),
                              ("m1", "24h", 3.0, 0.05, 0.02))
+            r2 = subprocess.run([sys.executable, "-B", "stats.py"], cwd=d, env=env, capture_output=True, text=True)  # second run, same window
+            self.assertEqual(json.loads(r2.stdout)["reel_milestones"], [])
+            self.assertEqual(json.loads((d / "milestones-seen.json").read_text()), ["m1:24h"])
 
 
 class WorkflowTests(unittest.TestCase):
     def setUp(self):
         self.text = (ROOT / ".github/workflows/stats.yml").read_text()
 
-    def test_schedule_is_off(self):
-        live = [l for l in self.text.splitlines() if not l.lstrip().startswith("#")]
-        self.assertFalse([l for l in live if re.search(r"schedule|cron", l)])
-        self.assertTrue(any(l.strip().startswith("# schedule:") for l in self.text.splitlines()))
-        self.assertTrue(any("cron:" in l and l.lstrip().startswith("#") for l in self.text.splitlines()))
+    def test_schedule_follows_the_flag(self):
+        lines = self.text.splitlines()
+        live = [l for l in lines if re.match(r"\s*(schedule:|- cron:)", l)]
+        if MILESTONES_ENABLED:
+            self.assertEqual(len(live), 2, "flag is on, so the schedule and cron lines must be live")
+        else:
+            self.assertEqual(live, [], "MILESTONES_ENABLED is False, so no live schedule or cron line")
+
+    def test_flag_is_a_real_bool_and_off_by_default(self):
+        self.assertIsInstance(MILESTONES_ENABLED, bool)
+        self.assertIn("MILESTONES_ENABLED = False", (ROOT / "milestones_config.py").read_text())
 
     def test_manual_run_still_there(self):
         self.assertIn("  workflow_dispatch:", self.text)
