@@ -35,5 +35,33 @@ jobs:
     # ponytail: extends the 60-day token; if Meta ever hands back a new string, the owner re-pastes it
     if: github.event.schedule == '0 3 * * 1'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
     steps:
-      - run: curl -sf "https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=${{ secrets.IG_TOKEN }}" -o /dev/null
+      - name: Refresh token
+        env:
+          IG_TOKEN: ${{ secrets.IG_TOKEN }}
+        run: |
+          echo "::add-mask::$IG_TOKEN"
+          curl -sf "https://graph.instagram.com/refresh_access_token?grant_type=ig_refresh_token&access_token=$IG_TOKEN" -o /dev/null
+      - name: Open issue if refresh failed
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="Instagram token refresh failed: check the token"
+          if [ -n "$(gh issue list --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number')" ]; then
+            echo "refresh-failed issue already open"; exit 0
+          fi
+          printf '%s\n' \
+            "The weekly Instagram token refresh failed, so the token will run out about 60 days after its last good refresh." \
+            "" \
+            "Run: $RUN_URL" \
+            "" \
+            "To fix it: open the run above, then make a fresh token in the Meta app dashboard and replace the IG_TOKEN secret in this repo's Actions secrets." \
+            "" \
+            "Opened automatically. This issue never contains the token." > "$RUNNER_TEMP/body.txt"
+          gh issue create --title "$TITLE" --body-file "$RUNNER_TEMP/body.txt"
