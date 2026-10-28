@@ -1,2 +1,4 @@
 __pycache__/
 milestones-seen.json
+.stats-key.pem
+insights/
