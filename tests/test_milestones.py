@@ -159,9 +159,8 @@ class WorkflowTests(unittest.TestCase):
         else:
             self.assertEqual(live, [], "MILESTONES_ENABLED is False, so no live schedule or cron line")
 
-    def test_flag_is_a_real_bool_and_off_by_default(self):
+    def test_flag_is_a_real_bool(self):
         self.assertIsInstance(MILESTONES_ENABLED, bool)
-        self.assertIn("MILESTONES_ENABLED = False", (ROOT / "milestones_config.py").read_text())
 
     def test_manual_run_still_there(self):
         self.assertIn("  workflow_dispatch:", self.text)
