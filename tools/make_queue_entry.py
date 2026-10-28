@@ -1,6 +1,10 @@
 """Build a queue entry for publish.py and check that Pages really serves its media.
 
-Two steps, with a push in between:
+Two steps, with a push in between. Both make runs (dry or --write) run the house post_check script
+(--post-check PATH or the POST_CHECK env var); any FAIL or non-zero exit blocks --write. With no path the
+tool prints POST_CHECK NOT RUN and refuses --write unless --no-post-check is given. With --write the entry
+is written only after the media URL (already pushed) (--pages-base, default the PAGES_BASE env var) answers 200 with the
+right content type and the post time clears the margin; on timeout nothing is written and the exit is 2.
 
   1. make     python tools/make_queue_entry.py make --media photo.jpg --caption-file cap.txt \\
                   --hashtags "#a #b" --alt-text "..." --publish-at 2026-11-02T17:00:00Z \\
@@ -17,9 +21,12 @@ It never reads IG_TOKEN and never calls Instagram.
 """
 import argparse
 import json
+import os
 import re
 import shutil
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -45,6 +52,10 @@ MEDIA_TYPES = {
     ".mp4": ("REELS", "video/mp4"),
     ".mov": ("REELS", "video/quicktime"),
 }
+# The pre-commit hook greps for: approved, colon, a quoted value containing Owner or owner.
+APPROVED_RE = re.compile(r'approved"?\s*:\s*"[^"]*[Oo]wner')
+FAIL_WORD = re.compile(r"\bFAIL\b")
+POST_CHECK_TIMEOUT = 120               # seconds
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -109,6 +120,8 @@ def check_entry(entry, media_src, now):
     post_type = entry["type"]
     if not entry.get("approved"):  # publish.run_due: SKIP when there is no owner approval
         errors.append("no approval words: the owner's own words must be recorded")
+    elif not APPROVED_RE.search(json.dumps(entry, indent=1, ensure_ascii=False)):  # the pre-commit hook's own grep
+        errors.append('approval does not pass the pre-commit check: the approved value must be quoted and contain "Owner" or "owner"')
     if not (media_src.is_file() and media_src.stat().st_size > 0):  # publish.run_due: FAIL when the file is missing
         errors.append(f"media file {media_src} is missing or empty")
     try:  # publish.container_params raises on an unknown type
@@ -155,10 +168,45 @@ def resolve_type(media_src, requested):
     return requested
 
 
+# ---- post_check ------------------------------------------------------------
+
+def run_post_check(path, entry):
+    """Run the house post_check script on a copy of the entry. Any FAIL or non-zero exit raises Refused."""
+    script = Path(path)
+    if not script.is_file():
+        raise Refused(f"post_check script {path} not found")
+    cmd = [sys.executable, str(script)] if script.suffix == ".py" else [str(script)]
+    with tempfile.TemporaryDirectory() as tmp:
+        probe = Path(tmp) / "entry.json"
+        probe.write_text(json.dumps(entry, indent=1, ensure_ascii=False), encoding="utf-8")
+        try:
+            r = subprocess.run(cmd + [str(probe)], capture_output=True, text=True, timeout=POST_CHECK_TIMEOUT)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise Refused(f"post_check could not run: {e}") from None
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
+    if out:
+        print(out)
+    if r.returncode != 0 or FAIL_WORD.search(out):
+        raise Refused(f"post_check failed (exit {r.returncode})")
+    print("POST_CHECK PASSED")
+
+
+def check_margin(due, confirmed, margin):
+    """The post time must be at least `margin` after the moment Pages was confirmed serving the media."""
+    earliest = confirmed + margin
+    if due < earliest:
+        raise Refused(f"post time {fmt_utc(due)} is sooner than the confirmed fetch plus the margin "
+                      f"({int(margin.total_seconds() // 60)} min, earliest {fmt_utc(earliest)}): "
+                      "move the post time later (or remove the entry) before it falls due")
+    return earliest
+
+
 # ---- step 1: make ----------------------------------------------------------
 
-def make(args, now=None):
+def make(args, now=None, fetch_fn=None, sleep=time.sleep, clock=None):
     now = now or datetime.now(timezone.utc)
+    clock = clock or (lambda: datetime.now(timezone.utc))
+    fetch_fn = fetch_fn or fetch
     root = Path(args.pages_dir) if args.pages_dir else publish.ROOT
     queue = Path(args.queue_dir) if args.queue_dir else publish.ROOT / "queue"
     media_src = Path(args.media)
@@ -189,12 +237,34 @@ def make(args, now=None):
     if media_dest.exists() and media_dest.read_bytes() != media_src.read_bytes():
         raise Refused(f"{media_dest} already exists with different content; not overwriting")
 
+    if args.no_post_check and args.post_check:
+        raise Refused("--no-post-check and --post-check contradict each other")
+    if args.no_post_check:
+        print("POST_CHECK SKIPPED (--no-post-check given)")
+    elif args.post_check:
+        run_post_check(args.post_check, entry)
+    else:
+        print("POST_CHECK NOT RUN: no --post-check path and no POST_CHECK env var")
+        if args.write:
+            raise Refused("POST_CHECK NOT RUN: give --post-check PATH (or set POST_CHECK), or --no-post-check on purpose")
+    if args.write and not args.pages_base:
+        raise Refused("--write needs --pages-base (or the PAGES_BASE env var) to confirm Pages serves the media")
+    if args.write and not args.pages_base.startswith("https://"):
+        raise Refused("--pages-base must be an https address")
+
     text = json.dumps(entry, indent=1, ensure_ascii=False)
     print(f"{'WRITE' if args.write else 'DRY RUN'} entry {entry_path}\n{text}")
     print(f"media {media_src} -> {media_dest}")
     if not args.write:
-        print("DRY RUN: nothing written. Add --write to write.")
+        print("DRY RUN: nothing written, Pages not polled. Add --write to write.")
         return entry_path
+
+    # Nothing touches disk until Pages serves the media (push it first if it is not there yet).
+    url = media_url(args.pages_base, entry["file"])
+    confirmed = wait_for_pages(url, MEDIA_TYPES[media_src.suffix][1], fetch_fn=fetch_fn, clock=clock, sleep=sleep,
+                               every=args.poll_seconds, max_wait=timedelta(minutes=args.max_wait_minutes))
+    print(f"CONFIRMED {url} answered 200 at {fmt_utc(confirmed)}")
+    check_margin(due, confirmed, CONFIRM_MARGIN + timedelta(minutes=max(0, args.extra_margin_minutes)))
 
     copied = not media_dest.exists()
     media_dest.parent.mkdir(parents=True, exist_ok=True)
@@ -212,7 +282,7 @@ def make(args, now=None):
         if copied:
             media_dest.unlink(missing_ok=True)
         raise
-    print(f"WRITTEN. Next: push, then run 'confirm {entry_path}' with your Pages address.")
+    print(f"WRITTEN {entry_path}. Next: push it; 'confirm {entry_path}' re-checks after the push.")
     return entry_path
 
 
@@ -253,6 +323,8 @@ def wait_for_pages(url, expected_type, *, fetch_fn=fetch, clock=None, sleep=time
 def confirm(args, clock=None, fetch_fn=fetch, sleep=time.sleep):
     clock = clock or (lambda: datetime.now(timezone.utc))
     entry = json.loads(Path(args.entry).read_text(encoding="utf-8"))
+    if not args.pages_base:
+        raise Refused("--pages-base is needed (or set the PAGES_BASE env var)")
     if not args.pages_base.startswith("https://"):
         raise Refused("--pages-base must be an https address")
     ext = Path(entry["file"]).suffix
@@ -264,11 +336,7 @@ def confirm(args, clock=None, fetch_fn=fetch, sleep=time.sleep):
     confirmed = wait_for_pages(url, MEDIA_TYPES[ext][1], fetch_fn=fetch_fn, clock=clock, sleep=sleep,
                                every=args.poll_seconds, max_wait=timedelta(minutes=args.max_wait_minutes))
     print(f"CONFIRMED {url} answered 200 {MEDIA_TYPES[ext][1]} at {fmt_utc(confirmed)}")
-    earliest = confirmed + margin
-    if due < earliest:
-        raise Refused(f"post time {entry['publish_at']} is sooner than the confirmed fetch plus the margin "
-                      f"({int(margin.total_seconds() // 60)} min, earliest {fmt_utc(earliest)}): "
-                      "move the post time later (or remove the entry) before it falls due")
+    earliest = check_margin(due, confirmed, margin)
     print(f"OK: due {entry['publish_at']} is at or after {fmt_utc(earliest)}")
 
 
@@ -289,10 +357,16 @@ def parser():
     m.add_argument("--pages-dir", help="Pages folder; media is copied to <pages-dir>/media/ (default: the repo)")
     m.add_argument("--queue-dir", help="where the entry goes (default: the repo's queue/)")
     m.add_argument("--slug", help="name part of the entry file (default: the media name)")
-    m.add_argument("--write", action="store_true", help="actually copy and write; without it nothing changes")
+    m.add_argument("--post-check", default=os.environ.get("POST_CHECK"), help="path to the house post_check script (default: POST_CHECK env var)")
+    m.add_argument("--no-post-check", action="store_true", help="allow --write without post_check; use on purpose only")
+    m.add_argument("--pages-base", default=os.environ.get("PAGES_BASE"), help="https://<user>.github.io/<repo>/ (default: PAGES_BASE env var)")
+    m.add_argument("--extra-margin-minutes", type=int, default=0, help="add to the margin; it cannot be lowered")
+    m.add_argument("--poll-seconds", type=int, default=POLL_EVERY)
+    m.add_argument("--max-wait-minutes", type=int, default=int(POLL_MAX.total_seconds() // 60))
+    m.add_argument("--write", action="store_true", help="copy and write, but only after post_check passes and Pages serves the media; without it nothing changes")
     c = sub.add_parser("confirm", help="after the push: wait for Pages, then check the post time")
     c.add_argument("entry", help="the queue entry JSON")
-    c.add_argument("--pages-base", required=True, help="https://<user>.github.io/<repo>/")
+    c.add_argument("--pages-base", default=os.environ.get("PAGES_BASE"), help="https://<user>.github.io/<repo>/ (default: PAGES_BASE env var)")
     c.add_argument("--extra-margin-minutes", type=int, default=0, help="add to the margin; it cannot be lowered")
     c.add_argument("--poll-seconds", type=int, default=POLL_EVERY)
     c.add_argument("--max-wait-minutes", type=int, default=int(POLL_MAX.total_seconds() // 60))

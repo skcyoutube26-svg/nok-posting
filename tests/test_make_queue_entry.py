@@ -20,6 +20,29 @@ WORDS = 'Owner, 1 Nov 2026: "looks good, queue it"'
 TOOL = Path(__file__).resolve().parent.parent / "tools" / "make_queue_entry.py"
 
 
+class FakeSubprocess:
+    """Stands in for the subprocess module inside the tool only; records each post_check call."""
+    TimeoutExpired = subprocess.TimeoutExpired
+
+    def __init__(self):
+        self.calls, self.result = [], subprocess.CompletedProcess([], 0, "all OK\n", "")
+
+    def run(self, cmd, **kw):
+        self.calls.append(cmd)
+        return self.result
+
+
+@pytest.fixture(autouse=True)
+def mocks(monkeypatch, tmp_path, request):
+    """post_check passes and Pages answers 200 with the right type unless a test says otherwise."""
+    fake = FakeSubprocess()
+    monkeypatch.setattr(mqe, "subprocess", fake)
+    if not request.node.name.startswith("test_fetch"):  # those test the real fetch against a mocked urlopen
+        monkeypatch.setattr(mqe, "fetch", lambda url: (200, "image/jpeg" if url.endswith(".jpg") else "video/mp4"))
+    (tmp_path / "post_check.sh").write_text("#!/bin/sh\n", encoding="utf-8")
+    return fake
+
+
 @pytest.fixture
 def work(tmp_path):
     """src/ holds fixture media and caption; site/ is the Pages folder; q/ the queue."""
@@ -32,7 +55,8 @@ def work(tmp_path):
 
 def args(work, **over):
     base = ["make", "--media", str(work / "src" / "rug.jpg"), "--caption-file", str(work / "src" / "cap.txt"),
-            "--publish-at", LATER, "--approved", WORDS, "--pages-dir", str(work / "site"), "--queue-dir", str(work / "q")]
+            "--publish-at", LATER, "--approved", WORDS, "--pages-dir", str(work / "site"), "--queue-dir", str(work / "q"),
+            "--post-check", str(work / "post_check.sh")]
     for k, v in over.items():
         flag = "--" + k.replace("_", "-")
         if k in ("media",):
@@ -55,7 +79,7 @@ def snapshot(root):
 
 
 def run_make(work, now=NOW, **over):
-    return mqe.make(args(work, **over), now=now)
+    return mqe.make(args(work, **over), now=now, clock=lambda: NOW)
 
 
 # ---- dry run / write ---------------------------------------------------------
@@ -125,7 +149,7 @@ def test_default_paths_follow_publish_root(work, monkeypatch):
     monkeypatch.setattr(publish, "ROOT", work / "repo")
     (work / "repo" / "queue").mkdir(parents=True)
     a = args(work, write=True, pages_dir=None, queue_dir=None)
-    path = mqe.make(a, now=NOW)
+    path = mqe.make(a, now=NOW, clock=lambda: NOW)
     assert path.parent == work / "repo" / "queue" and (work / "repo" / "media" / "rug.jpg").is_file()
 
 
@@ -390,5 +414,161 @@ def test_runs_as_a_script_dry_by_default(work):
                         "--pages-dir", str(work / "site"), "--queue-dir", str(work / "q")],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
-    assert "DRY RUN: nothing written" in r.stdout
+    assert "DRY RUN: nothing written" in r.stdout and "POST_CHECK NOT RUN" in r.stdout
     assert snapshot(work) == before
+
+
+# ---- fix 1: post_check -------------------------------------------------------
+
+def test_post_check_runs_in_dry_run_and_gets_the_entry(work, mocks, capsys):
+    run_make(work)
+    assert len(mocks.calls) == 1 and mocks.calls[0][0].endswith("post_check.sh")
+    out = capsys.readouterr().out
+    assert "POST_CHECK PASSED" in out and "DRY RUN: nothing written" in out
+
+
+def test_post_check_python_script_runs_under_this_interpreter(work, mocks):
+    script = work / "pc.py"
+    script.write_text("", encoding="utf-8")
+    run_make(work, post_check=str(script))
+    assert mocks.calls[0][:2] == [sys.executable, str(script)]
+
+
+@pytest.mark.parametrize("result", [
+    subprocess.CompletedProcess([], 1, "", "boom"),
+    subprocess.CompletedProcess([], 0, "caption: FAIL too long\n", ""),
+])
+def test_post_check_failure_blocks_write(work, mocks, result):
+    mocks.result = result
+    before = snapshot(work)
+    with pytest.raises(mqe.Refused, match="post_check failed"):
+        run_make(work, write=True)
+    assert snapshot(work) == before
+
+
+def test_post_check_failure_shows_in_dry_run_too(work, mocks):
+    mocks.result = subprocess.CompletedProcess([], 3, "FAIL\n", "")
+    with pytest.raises(mqe.Refused, match="post_check failed"):
+        run_make(work)
+
+
+def test_post_check_missing_script_refused(work):
+    with pytest.raises(mqe.Refused, match="not found"):
+        run_make(work, post_check=str(work / "nope.sh"))
+
+
+def test_no_path_dry_run_says_not_run_and_write_refused(work, capsys):
+    before = snapshot(work)
+    run_make(work, post_check=None)
+    assert "POST_CHECK NOT RUN" in capsys.readouterr().out
+    with pytest.raises(mqe.Refused, match="POST_CHECK NOT RUN"):
+        run_make(work, post_check=None, write=True)
+    assert snapshot(work) == before
+
+
+def test_no_post_check_flag_allows_write_and_says_so(work, mocks, capsys):
+    path = run_make(work, post_check=None, write=True, no_post_check=True)
+    assert path.is_file() and mocks.calls == []
+    assert "POST_CHECK SKIPPED" in capsys.readouterr().out
+
+
+def test_post_check_env_var_is_the_default(work, monkeypatch, mocks):
+    monkeypatch.setenv("POST_CHECK", str(work / "post_check.sh"))
+    a = mqe.parser().parse_args(["make", "--media", str(work / "src" / "rug.jpg"), "--caption-file", str(work / "src" / "cap.txt"),
+                                 "--publish-at", LATER, "--approved", WORDS, "--pages-dir", str(work / "site"),
+                                 "--queue-dir", str(work / "q")])
+    mqe.make(a, now=NOW, clock=lambda: NOW)
+    assert len(mocks.calls) == 1
+
+
+# ---- fix 2: same approval check as the pre-commit hook -----------------------
+
+@pytest.mark.parametrize("words", ['Owner, 1 Nov: "ok"', "the owner said go", 'Shahriar (owner): yes'])
+def test_approval_with_owner_passes(work, words):
+    run_make(work, approved=words)
+
+
+@pytest.mark.parametrize("words", ["Shahriar said fine", "looks good", "Master approves"])
+def test_approval_without_owner_fails(work, words):
+    with pytest.raises(mqe.Refused, match="pre-commit"):
+        run_make(work, approved=words)
+
+
+def test_approval_regex_matches_the_hook_pattern():
+    assert mqe.APPROVED_RE.search('"approved": "Owner, ok"')
+    assert mqe.APPROVED_RE.search('"approved":"owner ok"')
+    assert not mqe.APPROVED_RE.search('"approved": "Nok master ok"')
+    assert not mqe.APPROVED_RE.search('"caption": "owner of rugs"')
+
+
+# ---- fix 3: Pages poll gates the write; PAGES_BASE default -------------------
+
+def test_write_polls_the_media_url_before_writing(work, monkeypatch):
+    seen = []
+
+    def fetch(url):
+        seen.append((url, (work / "q" / "2026-11-02T1700Z-rug.json").exists()))
+        return 200, "image/jpeg"
+    monkeypatch.setattr(mqe, "fetch", fetch)
+    run_make(work, write=True)
+    assert seen == [("https://example.invalid/pages/media/rug.jpg", False)]
+
+
+def test_write_waits_through_404_then_writes(work, monkeypatch):
+    answers = [(404, "text/html"), (404, "text/html"), (200, "image/jpeg")]
+    monkeypatch.setattr(mqe, "fetch", lambda url: answers.pop(0))
+    clock = Clock()
+    path = mqe.make(args(work, write=True), now=NOW, clock=clock, sleep=clock.sleep)
+    assert path.is_file() and answers == []
+
+
+def test_wrong_content_type_never_writes(work, monkeypatch):
+    clock = Clock()
+    monkeypatch.setattr(mqe, "fetch", lambda url: (200, "text/html"))
+    a = args(work, write=True, max_wait_minutes="1", poll_seconds="20")
+    with pytest.raises(mqe.Refused, match="never answered"):
+        mqe.make(a, now=NOW, clock=clock, sleep=clock.sleep)
+    assert not (work / "q").exists() and not (work / "site" / "media" / "rug.jpg").exists()
+
+
+def test_timeout_writes_nothing_and_exits_nonzero(work, monkeypatch, capsys):
+    monkeypatch.setattr(mqe, "fetch", lambda url: (404, "text/html"))
+    before = snapshot(work)
+    code = mqe.main(["make", "--media", str(work / "src" / "rug.jpg"), "--caption-file", str(work / "src" / "cap.txt"),
+                     "--publish-at", LATER, "--approved", WORDS, "--pages-dir", str(work / "site"),
+                     "--queue-dir", str(work / "q"), "--post-check", str(work / "post_check.sh"),
+                     "--write", "--max-wait-minutes", "0"])
+    assert code == 2 and "never answered" in capsys.readouterr().err
+    assert snapshot(work) == before
+
+
+def test_write_refused_when_due_inside_margin_of_confirmed_fetch(work):
+    late = lambda: NOW + timedelta(minutes=30)  # Pages only answers 30 minutes in: 12:30 + 15 > 12:40
+    with pytest.raises(mqe.Refused, match="sooner than the confirmed fetch"):
+        mqe.make(args(work, write=True, publish_at="2026-11-01T12:40:00Z"), now=NOW, clock=late)
+    assert not (work / "q").exists()
+
+
+def test_dry_run_does_not_poll(work, monkeypatch):
+    def boom(url):
+        raise AssertionError("dry run polled Pages")
+    monkeypatch.setattr(mqe, "fetch", boom)
+    run_make(work)
+
+
+def test_write_without_any_pages_base_refused(work, monkeypatch):
+    monkeypatch.delenv("PAGES_BASE")
+    with pytest.raises(mqe.Refused, match="--pages-base"):
+        run_make(work, write=True)
+    assert not (work / "q").exists()
+
+
+def test_pages_base_defaults_to_env_for_make_and_confirm(work, monkeypatch):
+    monkeypatch.setenv("PAGES_BASE", "https://me.github.io/nok/")
+    a = args(work)
+    assert a.pages_base == "https://me.github.io/nok/"
+    assert mqe.parser().parse_args(["confirm", "x.json"]).pages_base == "https://me.github.io/nok/"
+    seen = []
+    monkeypatch.setattr(mqe, "fetch", lambda url: seen.append(url) or (200, "image/jpeg"))
+    mqe.make(args(work, write=True), now=NOW, clock=lambda: NOW)
+    assert seen == ["https://me.github.io/nok/media/rug.jpg"]
