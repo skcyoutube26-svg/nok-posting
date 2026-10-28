@@ -1,8 +1,9 @@
 """Build a queue entry for publish.py and check that Pages really serves its media.
 
 Two steps, with a push in between. Both make runs (dry or --write) run the house post_check script
-(--post-check PATH or the POST_CHECK env var); any FAIL or non-zero exit blocks --write. With no path the
-tool prints POST_CHECK NOT RUN and refuses --write unless --no-post-check is given. With --write the entry
+(--post-check PATH or the POST_CHECK env var) on the real media (--media); any FAIL or non-zero exit blocks
+--write. With no path the tool prints POST_CHECK NOT RUN and refuses --write. --no-post-check skips the check
+for a dry run only; combined with --write it is refused. With --write the entry
 is written only after the media URL (already pushed) (--pages-base, default the PAGES_BASE env var) answers 200 with the
 right content type and the post time clears the margin; on timeout nothing is written and the exit is 2.
 
@@ -54,7 +55,7 @@ MEDIA_TYPES = {
 }
 # The pre-commit hook greps for: approved, colon, a quoted value containing Owner or owner.
 APPROVED_RE = re.compile(r'approved"?\s*:\s*"[^"]*[Oo]wner')
-FAIL_WORD = re.compile(r"\bFAIL\b")
+FAIL_ROW = re.compile(r"^\s*FAIL\b", re.MULTILINE)  # a result row ("  FAIL  check ..."), not the summary "No FAIL in 1 post."
 POST_CHECK_TIMEOUT = 120               # seconds
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -170,8 +171,9 @@ def resolve_type(media_src, requested):
 
 # ---- post_check ------------------------------------------------------------
 
-def run_post_check(path, entry):
-    """Run the house post_check script on a copy of the entry. Any FAIL or non-zero exit raises Refused."""
+def run_post_check(path, entry, media):
+    """Run the house post_check script on a copy of the entry, with --media naming the real file (the copy sits
+    in a temp folder, so the script would look for the media there). Any FAIL or non-zero exit raises Refused."""
     script = Path(path)
     if not script.is_file():
         raise Refused(f"post_check script {path} not found")
@@ -180,13 +182,14 @@ def run_post_check(path, entry):
         probe = Path(tmp) / "entry.json"
         probe.write_text(json.dumps(entry, indent=1, ensure_ascii=False), encoding="utf-8")
         try:
-            r = subprocess.run(cmd + [str(probe)], capture_output=True, text=True, timeout=POST_CHECK_TIMEOUT)
+            r = subprocess.run(cmd + [str(probe), "--media", str(Path(media).resolve())], capture_output=True, text=True,
+                               timeout=POST_CHECK_TIMEOUT)
         except (OSError, subprocess.TimeoutExpired) as e:
             raise Refused(f"post_check could not run: {e}") from None
     out = ((r.stdout or "") + (r.stderr or "")).strip()
     if out:
         print(out)
-    if r.returncode != 0 or FAIL_WORD.search(out):
+    if r.returncode != 0 or FAIL_ROW.search(out):
         raise Refused(f"post_check failed (exit {r.returncode})")
     print("POST_CHECK PASSED")
 
@@ -237,16 +240,19 @@ def make(args, now=None, fetch_fn=None, sleep=time.sleep, clock=None):
     if media_dest.exists() and media_dest.read_bytes() != media_src.read_bytes():
         raise Refused(f"{media_dest} already exists with different content; not overwriting")
 
+    if args.no_post_check and args.write:
+        raise Refused("--no-post-check cannot go with --write: a written entry must pass post_check. "
+                      "Drop --no-post-check, or drop --write for a dry run")
     if args.no_post_check and args.post_check:
         raise Refused("--no-post-check and --post-check contradict each other")
     if args.no_post_check:
         print("POST_CHECK SKIPPED (--no-post-check given)")
     elif args.post_check:
-        run_post_check(args.post_check, entry)
+        run_post_check(args.post_check, entry, media_src)
     else:
         print("POST_CHECK NOT RUN: no --post-check path and no POST_CHECK env var")
         if args.write:
-            raise Refused("POST_CHECK NOT RUN: give --post-check PATH (or set POST_CHECK), or --no-post-check on purpose")
+            raise Refused("POST_CHECK NOT RUN: give --post-check PATH or set POST_CHECK; --write never skips post_check")
     if args.write and not args.pages_base:
         raise Refused("--write needs --pages-base (or the PAGES_BASE env var) to confirm Pages serves the media")
     if args.write and not args.pages_base.startswith("https://"):
@@ -358,7 +364,7 @@ def parser():
     m.add_argument("--queue-dir", help="where the entry goes (default: the repo's queue/)")
     m.add_argument("--slug", help="name part of the entry file (default: the media name)")
     m.add_argument("--post-check", default=os.environ.get("POST_CHECK"), help="path to the house post_check script (default: POST_CHECK env var)")
-    m.add_argument("--no-post-check", action="store_true", help="allow --write without post_check; use on purpose only")
+    m.add_argument("--no-post-check", action="store_true", help="dry run only: skip post_check (refused together with --write)")
     m.add_argument("--pages-base", default=os.environ.get("PAGES_BASE"), help="https://<user>.github.io/<repo>/ (default: PAGES_BASE env var)")
     m.add_argument("--extra-margin-minutes", type=int, default=0, help="add to the margin; it cannot be lowered")
     m.add_argument("--poll-seconds", type=int, default=POLL_EVERY)

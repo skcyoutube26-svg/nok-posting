@@ -2,6 +2,7 @@
 Everything lives in tmp_path; HTTP is mocked; the conftest network guard stays on."""
 import io
 import json
+import os
 import subprocess
 import sys
 import urllib.error
@@ -18,6 +19,7 @@ NOW = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
 LATER = "2026-11-02T17:00:00Z"
 WORDS = 'Owner, 1 Nov 2026: "looks good, queue it"'
 TOOL = Path(__file__).resolve().parent.parent / "tools" / "make_queue_entry.py"
+REAL_POST_CHECK = os.environ.get("POST_CHECK", "")  # read before the autouse fixture clears it for the other tests
 
 
 class FakeSubprocess:
@@ -34,9 +36,11 @@ class FakeSubprocess:
 
 @pytest.fixture(autouse=True)
 def mocks(monkeypatch, tmp_path, request):
-    """post_check passes and Pages answers 200 with the right type unless a test says otherwise."""
+    """post_check passes and Pages answers 200 with the right type unless a test says otherwise.
+    POST_CHECK is cleared so a developer's env var cannot leak into tests that mean "no path"."""
     fake = FakeSubprocess()
     monkeypatch.setattr(mqe, "subprocess", fake)
+    monkeypatch.delenv("POST_CHECK", raising=False)
     if not request.node.name.startswith("test_fetch"):  # those test the real fetch against a mocked urlopen
         monkeypatch.setattr(mqe, "fetch", lambda url: (200, "image/jpeg" if url.endswith(".jpg") else "video/mp4"))
     (tmp_path / "post_check.sh").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -421,8 +425,10 @@ def test_runs_as_a_script_dry_by_default(work):
 # ---- fix 1: post_check -------------------------------------------------------
 
 def test_post_check_runs_in_dry_run_and_gets_the_entry(work, mocks, capsys):
+    mocks.result = subprocess.CompletedProcess([], 0, "  PASS  media file  x\nNo FAIL in 1 post.\n", "")  # the real summary line
     run_make(work)
     assert len(mocks.calls) == 1 and mocks.calls[0][0].endswith("post_check.sh")
+    assert mocks.calls[0][-2:] == ["--media", str(work / "src" / "rug.jpg")]
     out = capsys.readouterr().out
     assert "POST_CHECK PASSED" in out and "DRY RUN: nothing written" in out
 
@@ -436,7 +442,7 @@ def test_post_check_python_script_runs_under_this_interpreter(work, mocks):
 
 @pytest.mark.parametrize("result", [
     subprocess.CompletedProcess([], 1, "", "boom"),
-    subprocess.CompletedProcess([], 0, "caption: FAIL too long\n", ""),
+    subprocess.CompletedProcess([], 0, "  FAIL  caption length            2300 > 2200\n", ""),
 ])
 def test_post_check_failure_blocks_write(work, mocks, result):
     mocks.result = result
@@ -466,10 +472,19 @@ def test_no_path_dry_run_says_not_run_and_write_refused(work, capsys):
     assert snapshot(work) == before
 
 
-def test_no_post_check_flag_allows_write_and_says_so(work, mocks, capsys):
-    path = run_make(work, post_check=None, write=True, no_post_check=True)
-    assert path.is_file() and mocks.calls == []
+def test_no_post_check_is_for_dry_runs_only(work, mocks, capsys):
+    before = snapshot(work)
+    run_make(work, post_check=None, no_post_check=True)
+    assert snapshot(work) == before and mocks.calls == []
     assert "POST_CHECK SKIPPED" in capsys.readouterr().out
+    with pytest.raises(mqe.Refused, match="cannot go with --write"):
+        run_make(work, post_check=None, write=True, no_post_check=True)
+    assert snapshot(work) == before and mocks.calls == []
+    code = mqe.main(["make", "--media", str(work / "src" / "rug.jpg"), "--caption-file", str(work / "src" / "cap.txt"),
+                     "--publish-at", LATER, "--approved", WORDS, "--pages-dir", str(work / "site"),
+                     "--queue-dir", str(work / "q"), "--no-post-check", "--write"])
+    assert code == 2 and "cannot go with --write" in capsys.readouterr().err
+    assert snapshot(work) == before
 
 
 def test_post_check_env_var_is_the_default(work, monkeypatch, mocks):
@@ -572,3 +587,37 @@ def test_pages_base_defaults_to_env_for_make_and_confirm(work, monkeypatch):
     monkeypatch.setattr(mqe, "fetch", lambda url: seen.append(url) or (200, "image/jpeg"))
     mqe.make(args(work, write=True), now=NOW, clock=lambda: NOW)
     assert seen == ["https://me.github.io/nok/media/rug.jpg"]
+
+
+# ---- the real post_check script ----------------------------------------------
+
+def write_fixture_image(path, size):
+    """A solid-colour JPEG of the given pixel size. Pillow is the only dependency."""
+    Image = pytest.importorskip("PIL.Image")
+    Image.new("RGB", size, (200, 120, 60)).save(path, "JPEG")
+
+
+def test_real_post_check_passes_good_media_and_blocks_broken_media(work, monkeypatch, capsys):
+    if not REAL_POST_CHECK:
+        pytest.skip("POST_CHECK is not set: point it at the house post_check.py (D:/house-tools/tools/post_check.py) to run this test")
+    if not Path(REAL_POST_CHECK).is_file():
+        pytest.skip(f"POST_CHECK={REAL_POST_CHECK} is not a file: the real post_check test is skipped")
+    monkeypatch.setattr(mqe, "subprocess", subprocess)  # the real module, not the in-process fake
+    good, wide = work / "src" / "good.jpg", work / "src" / "wide.jpg"
+    write_fixture_image(good, (1080, 1350))  # 4:5, what the IMAGE rule wants
+    write_fixture_image(wide, (1600, 900))   # 16:9, fails the IMAGE rule
+    (work / "src" / "cap.txt").write_text("Hand-knotted rug, 1960s.\n", encoding="utf-8")
+    flags = dict(post_check=REAL_POST_CHECK, hashtags="#antiquerugs #newyorkcity")
+
+    path = run_make(work, write=True, media=str(good), **flags)
+    out = capsys.readouterr().out
+    assert "POST_CHECK PASSED" in out and "aspect ratio" in out and str(good) in out
+    assert path == work / "q" / "2026-11-02T1700Z-good.json"
+    assert json.loads(path.read_text(encoding="utf-8"))["file"] == "media/good.jpg"
+
+    before = snapshot(work)
+    with pytest.raises(mqe.Refused, match="post_check failed"):
+        run_make(work, write=True, media=str(wide), **flags)
+    out = capsys.readouterr().out
+    assert "FAIL" in out and "aspect ratio" in out
+    assert snapshot(work) == before
