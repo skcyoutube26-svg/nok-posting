@@ -1,8 +1,12 @@
 """Read-only @noknyc numbers: followers, and per post views, reach, saves, shares, likes, comments, AI label.
+Also reel_milestones: rates per reach for Reels at 24 h, 48 h, 72 h and 7 d (see milestones.py).
 Prints JSON to stdout. Run: IG_TOKEN=... python stats.py
 """
-import json
+import json, os
 from publish import call
+from milestones import reel_milestones, record_reads
+
+SEEN_FILE = os.environ.get("MILESTONES_SEEN", "milestones-seen.json")  # ids only, no numbers, no secrets
 
 METRICS = "views,reach,saved,shares,likes,comments,total_interactions"
 
@@ -20,4 +24,13 @@ for m in call("GET", "me/media", fields=url_fields, limit="50").get("data", []):
     except RuntimeError as e:
         m["comments_list"] = str(e)[:120]
     posts.append({**m, **ins})
-print(json.dumps({"account": me, "posts": posts}, ensure_ascii=False))
+try:
+    seen = set(json.load(open(SEEN_FILE)))
+except (OSError, ValueError, TypeError):
+    seen = set()
+due = reel_milestones(posts, seen=seen)
+try:
+    json.dump(sorted(record_reads(seen, due)), open(SEEN_FILE, "w"))
+except OSError:
+    pass  # never lose the stats over the bookkeeping file
+print(json.dumps({"account": me, "posts": posts, "reel_milestones": due}, ensure_ascii=False))

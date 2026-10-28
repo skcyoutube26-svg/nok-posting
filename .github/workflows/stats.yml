@@ -1,11 +1,20 @@
 name: stats
 # Read-only numbers. The repo and its logs are public, so the output is encrypted to a key kept off GitHub.
-on: workflow_dispatch
+on:
+  workflow_dispatch:
+  # Reel milestone reads (Fable CEO RULINGS 100): OFF until the Nok master turns it on. To turn on, set MILESTONES_ENABLED = True in milestones_config.py and uncomment the next 2 lines.
+  # schedule:
+  #   - cron: "23 */6 * * *"   # every 6 h; milestones.py reads each milestone once, on the first run inside its 8 h window
 jobs:
   stats:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/cache@v4  # remembers which milestones were already read (ids only); nothing is pushed
+        with:
+          path: milestones-seen.json
+          key: milestones-seen-${{ github.run_id }}
+          restore-keys: milestones-seen-
       - env:
           IG_TOKEN: ${{ secrets.IG_TOKEN }}
           PAGES_BASE: https://example.invalid/
