@@ -2,6 +2,7 @@
 All HTTP is mocked (publish.call is replaced); the conftest network guard stays on."""
 import json
 import urllib.error
+import urllib.parse
 
 import pytest
 
@@ -214,3 +215,94 @@ def test_call_turns_http_error_into_runtime_error(monkeypatch):
     monkeypatch.setattr(publish.urllib.request, "urlopen", fake)
     with pytest.raises(RuntimeError, match="400.*bad video"):
         publish.call("POST", "me/media", media_type="REELS")
+
+
+# ---- Trial Reels (optional "trial" field, default off) --------------------------
+
+# What container_params returned for REEL before Trial Reels existed.
+REEL_PARAMS_BEFORE = {"is_ai_generated": "true", "media_type": "REELS", "video_url": "u",
+                      "caption": "Thirty rugs.", "share_to_feed": "true"}
+
+
+def test_no_trial_field_leaves_the_request_unchanged(monkeypatch, sleeps):
+    assert publish.container_params(REEL, "u") == REEL_PARAMS_BEFORE
+    api = install(monkeypatch, ScriptedApi(["FINISHED"]))
+    publish.publish(REEL)
+    sent = api.params("POST", "me/media")
+    assert "trial_params" not in sent
+    # byte-identical wire body: exactly the old keys, same order, same encoding
+    old = dict(REEL_PARAMS_BEFORE, video_url="https://example.invalid/pages/media/my%20rug.mp4")
+    assert list(sent) == list(old) and urllib.parse.urlencode(sent) == urllib.parse.urlencode(old)
+
+
+def test_trial_null_counts_as_off():
+    assert publish.container_params(dict(REEL, trial=None), "u") == REEL_PARAMS_BEFORE
+
+
+@pytest.mark.parametrize("strategy", ["MANUAL", "SS_PERFORMANCE"])
+def test_trial_sends_json_encoded_trial_params(strategy, monkeypatch, sleeps):
+    api = install(monkeypatch, ScriptedApi(["FINISHED"]))
+    publish.publish(dict(REEL, trial=strategy))
+    sent = api.params("POST", "me/media")
+    assert isinstance(sent["trial_params"], str)
+    assert json.loads(sent["trial_params"]) == {"graduation_strategy": strategy}
+    assert {k: v for k, v in sent.items() if k != "trial_params"}.items() >= {"media_type": "REELS", "share_to_feed": "true", "is_ai_generated": "true"}.items()
+
+
+def test_trial_params_survive_form_encoding(monkeypatch):
+    seen = {}
+
+    class R:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b'{"id": "c1"}'
+
+    def fake(req, timeout):
+        seen["body"] = req.data.decode()
+        return R()
+    monkeypatch.setattr(publish.urllib.request, "urlopen", fake)
+    publish.call("POST", "me/media", **publish.container_params(dict(REEL, trial="MANUAL"), "u"))
+    form = urllib.parse.parse_qs(seen["body"])
+    assert json.loads(form["trial_params"][0]) == {"graduation_strategy": "MANUAL"}
+
+
+def test_trial_does_not_change_the_rest_of_the_flow(monkeypatch, sleeps):
+    api = install(monkeypatch, ScriptedApi(["FINISHED"]))
+    mid, _ = publish.publish(dict(REEL, trial="SS_PERFORMANCE"))
+    assert mid == "m1"
+    assert api.paths() == [("POST", "me/media"), ("GET", "c1"), ("POST", "me/media_publish"), ("GET", "m1")]
+    assert api.params("POST", "me/media_publish") == {"creation_id": "c1"}
+
+
+@pytest.mark.parametrize("bad", ["manual", "AUTO", "", "TRUE", True, 1, ["MANUAL"]])
+def test_unknown_trial_value_is_rejected(bad, monkeypatch, sleeps):
+    with pytest.raises(ValueError, match="unknown trial"):
+        publish.container_params(dict(REEL, trial=bad), "u")
+    api = install(monkeypatch, ScriptedApi([]))
+    with pytest.raises(ValueError):
+        publish.publish(dict(REEL, trial=bad))
+    assert api.calls == []   # nothing was sent to Meta
+
+
+@pytest.mark.parametrize("kind", ["IMAGE", "STORIES"])
+def test_trial_on_a_non_reel_is_rejected(kind):
+    with pytest.raises(ValueError, match="only for REELS"):
+        publish.container_params({"type": kind, "caption": "c", "trial": "MANUAL"}, "m.jpg")
+
+
+def test_bad_trial_fails_in_run_due_and_stays_queued(repo, monkeypatch, capsys):
+    post = dict(REEL, file="media/r.mp4", publish_at="2020-01-01T00:00:00Z", approved="Owner: ok", trial="nope")
+    (repo / "queue" / "r.json").write_text(json.dumps(post), encoding="utf-8")
+    (repo / "media" / "r.mp4").write_bytes(b"x")
+    api = ScriptedApi([])
+    real = api.__call__
+
+    def with_live(method, path, **params):
+        if (method, path) == ("GET", "me/media"):
+            return {"data": []}
+        return real(method, path, **params)
+    monkeypatch.setattr(publish, "call", with_live)
+    assert publish.run_due(dry=False) is True
+    assert "FAIL r.json" in capsys.readouterr().out
+    assert api.calls == []
+    assert (repo / "queue" / "r.json").exists() and (repo / "media" / "r.mp4").exists()
