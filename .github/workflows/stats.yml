@@ -3,8 +3,8 @@ name: stats
 on:
   workflow_dispatch:
   # Reel milestone reads (Fable CEO RULINGS 100): OFF until the Nok master turns it on. To turn on, set MILESTONES_ENABLED = True in milestones_config.py and uncomment the next 2 lines.
-  # schedule:
-  #   - cron: "23 */6 * * *"   # every 6 h; milestones.py reads each milestone once, on the first run inside its 8 h window
+  schedule:
+    - cron: "23 */6 * * *"   # every 6 h; milestones.py reads each milestone once, on the first run inside its 8 h window
 jobs:
   stats:
     runs-on: ubuntu-latest
