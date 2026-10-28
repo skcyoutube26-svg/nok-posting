@@ -3,6 +3,7 @@
 A post is one JSON file in queue/ (added only after the owner's word):
   {"publish_at": "2026-10-02T12:30:00Z", "type": "IMAGE" | "REELS" | "STORIES",
    "file": "media/rugs.jpg", "caption": "...", "alt_text": "...", "approved": "<owner's words>"}
+Optional, REELS only: "trial": "MANUAL" | "SS_PERFORMANCE" posts the Reel as a Trial Reel (see README). Absent = a normal Reel.
 Media is fetched by Meta from GitHub Pages (PAGES_BASE). Every post carries the AI label.
 When published, the JSON moves to done/ with the media id and the media file is deleted.
 Run: IG_TOKEN=... PAGES_BASE=https://<user>.github.io/<repo>/ python publish.py [--dry]
@@ -13,6 +14,7 @@ from pathlib import Path
 
 API = "https://graph.instagram.com"
 ROOT = Path(__file__).parent
+TRIAL_STRATEGIES = ("MANUAL", "SS_PERFORMANCE")  # graduation_strategy values Meta accepts for Trial Reels
 
 
 def call(method, path, **params):
@@ -29,6 +31,11 @@ def call(method, path, **params):
 
 def container_params(post, url):
     kind = post["type"]
+    trial = post.get("trial")
+    if trial is not None and kind != "REELS":
+        raise ValueError(f"trial is only for REELS, not {kind}")
+    if trial is not None and trial not in TRIAL_STRATEGIES:
+        raise ValueError(f"unknown trial {trial!r}: use one of {', '.join(TRIAL_STRATEGIES)}")
     p = {"is_ai_generated": "true"}
     if kind == "IMAGE":
         p.update(image_url=url, caption=post.get("caption", ""))
@@ -38,6 +45,8 @@ def container_params(post, url):
         p.update(media_type="REELS", video_url=url, caption=post.get("caption", ""), share_to_feed="true")
         if post.get("thumb_offset_ms"):
             p["thumb_offset"] = str(post["thumb_offset_ms"])  # cover frame
+        if trial is not None:
+            p["trial_params"] = json.dumps({"graduation_strategy": trial})  # Trial Reel: shown to non-followers first
     elif kind == "STORIES":
         p.update(media_type="STORIES", **({"video_url": url} if url.endswith(".mp4") else {"image_url": url}))
     else:
