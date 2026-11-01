@@ -5,7 +5,11 @@ Use:  sh tools/read_stats.sh > insights/stats.json
       python tools/week_report.py insights/stats.json
       (or: sh tools/read_stats.sh | python tools/week_report.py -)
 
-Prints the markdown report and writes insights/report-YYYY-MM-DD.json. The next run compares
+Prints the markdown report and writes insights/report-YYYY-MM-DD.json. Output is always UTF-8
+(also through a Windows pipe), so curly quotes and dashes in captions survive. Each post row has a
+"Reach +" column: reach now minus reach in the previous report ("–" for a first report, a post
+missing from it, or a missing number).
+Exit codes: 0 ok, 2 bad arguments (argparse). The next run compares
 against the newest earlier report-*.json in the same folder (--insights-dir to change it).
 Reels are read at 24h / 48h / 72h / 7d after posting: the first report taken at or after each
 milestone is kept for good, and shown as likes / saves / shares per 100 reach.
@@ -59,7 +63,9 @@ def build_report(stats, prev, now, same_day=None):
     for p in stats.get("posts", []):
         pid = str(p["id"])
         snap = {k: num(p.get(k)) for k in METRICS}
+        old_reach = num(prev_posts.get(pid, {}).get("reach"))
         entry = {"label": label(p), "reel": is_reel(p), "timestamp": p.get("timestamp"), **snap,
+                 "reach_delta": None if snap["reach"] is None or old_reach is None else snap["reach"] - old_reach,
                  "milestones": {**prev_posts.get(pid, {}).get("milestones", {}),
                                       **today_posts.get(pid, {}).get("milestones", {})}}
         if entry["reel"] and p.get("timestamp") and snap["reach"] is not None:
@@ -109,9 +115,9 @@ def cell(m):
 def render(report, change):
     L = [f"# Week report {report['generated'][:10]}", "", f"**Followers:** {fmt(report['followers'])}", ""]
     posts = list(report["posts"].values())
-    L += ["## Posts", "", "| Post | Reach | Likes | Saves | Shares |", "|---|--:|--:|--:|--:|"]
+    L += ["## Posts", "", "| Post | Reach | Likes | Saves | Shares | Reach + |", "|---|--:|--:|--:|--:|--:|"]
     for e in sorted(posts, key=lambda e: str(e["timestamp"]), reverse=True):
-        L.append(f"| {e['label']} | {fmt(e['reach'])} | {fmt(e['likes'])} | {fmt(e['saved'])} | {fmt(e['shares'])} |")
+        L.append(f"| {e['label']} | {fmt(e['reach'])} | {fmt(e['likes'])} | {fmt(e['saved'])} | {fmt(e['shares'])} | {'–' if e.get('reach_delta') is None else signed(e['reach_delta'])} |")
     reels = [e for e in posts if e["reel"]]
     if reels:
         L += ["", "## Reels: likes / saves / shares per 100 reach", "",
@@ -143,6 +149,9 @@ def find_prev(folder, out_name):
 
 
 def main(argv=None, now=None):
+    for stream in (sys.stdout, sys.stdin):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("stats", help="decrypted stats JSON file, or - for stdin")
     ap.add_argument("--insights-dir", default="insights")
