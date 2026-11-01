@@ -12,6 +12,7 @@ run in the window may retry it. The caller (stats.py) keeps the seen set between
 from datetime import datetime, timezone
 
 MILESTONES = {"24h": 24, "48h": 48, "72h": 72, "7d": 168}
+WATCH_FIELDS = ("ig_reels_avg_watch_time", "ig_reels_video_view_total_time")  # carried through unchanged, never divided
 WINDOW_HOURS = 8  # wider than the 6 h schedule in stats.yml so a late or skipped run still lands inside; the seen set stops double reads
 
 
@@ -48,6 +49,8 @@ def reel_milestones(posts, now=None, seen=()):
                     reach = p.get("reach")
                     entry.update(reach=reach, plays_per_reach=rate(p.get("views"), reach),
                                  saves_per_reach=rate(p.get("saved"), reach), shares_per_reach=rate(p.get("shares"), reach))
+                    for k in WATCH_FIELDS:  # raw milliseconds from stats.py; null when Instagram gave none
+                        entry[k] = p.get(k)
                 out.append(entry)
         except (KeyError, ValueError, TypeError):
             continue  # one bad post must never cost the rest of the stats
