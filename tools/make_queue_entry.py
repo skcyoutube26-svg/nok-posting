@@ -4,8 +4,12 @@ Two steps, with a push in between. Both make runs (dry or --write) run the house
 (--post-check PATH or the POST_CHECK env var) on the real media (--media); any FAIL or non-zero exit blocks
 --write. With no path the tool prints POST_CHECK NOT RUN and refuses --write. --no-post-check skips the check
 for a dry run only; combined with --write it is refused. With --write the entry
-is written only after the media URL (already pushed) (--pages-base, default the PAGES_BASE env var) answers 200 with the
+is written only after the media URL (already pushed) (see the Pages base order below) answers 200 with the
 right content type and the post time clears the margin; on timeout nothing is written and the exit is 2.
+
+Pages base, first match wins: --pages-base flag, then the PAGES_BASE env var, then "pages_base" in the repo's
+pages_config.json (CONFIG_PATH). Neither flag nor env set and no config value: both commands refuse.
+Exit codes: 0 ok, 2 refused or Pages never confirmed.
 
   1. make     python tools/make_queue_entry.py make --media photo.jpg --caption-file cap.txt \\
                   --hashtags "#a #b" --alt-text "..." --publish-at 2026-11-02T17:00:00Z \\
@@ -253,9 +257,10 @@ def make(args, now=None, fetch_fn=None, sleep=time.sleep, clock=None):
         print("POST_CHECK NOT RUN: no --post-check path and no POST_CHECK env var")
         if args.write:
             raise Refused("POST_CHECK NOT RUN: give --post-check PATH or set POST_CHECK; --write never skips post_check")
-    if args.write and not args.pages_base:
-        raise Refused("--write needs --pages-base (or the PAGES_BASE env var) to confirm Pages serves the media")
-    if args.write and not args.pages_base.startswith("https://"):
+    pages_base = resolve_pages_base(args) if args.write else None
+    if args.write and not pages_base:
+        raise Refused("--write needs --pages-base (or the PAGES_BASE env var, or pages_base in pages_config.json) to confirm Pages serves the media")
+    if args.write and not pages_base.startswith("https://"):
         raise Refused("--pages-base must be an https address")
 
     text = json.dumps(entry, indent=1, ensure_ascii=False)
@@ -266,7 +271,7 @@ def make(args, now=None, fetch_fn=None, sleep=time.sleep, clock=None):
         return entry_path
 
     # Nothing touches disk until Pages serves the media (push it first if it is not there yet).
-    url = media_url(args.pages_base, entry["file"])
+    url = media_url(pages_base, entry["file"])
     confirmed = wait_for_pages(url, MEDIA_TYPES[media_src.suffix][1], fetch_fn=fetch_fn, clock=clock, sleep=sleep,
                                every=args.poll_seconds, max_wait=timedelta(minutes=args.max_wait_minutes))
     print(f"CONFIRMED {url} answered 200 at {fmt_utc(confirmed)}")
@@ -293,6 +298,24 @@ def make(args, now=None, fetch_fn=None, sleep=time.sleep, clock=None):
 
 
 # ---- step 2: confirm -------------------------------------------------------
+
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "pages_config.json"
+
+
+def config_pages_base(path=None):
+    """The "pages_base" value in the repo config file, or None if the file or the value is missing or unreadable."""
+    try:
+        data = json.loads(Path(path or CONFIG_PATH).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get("pages_base") if isinstance(data, dict) else None
+    return value.strip() or None if isinstance(value, str) else None
+
+
+def resolve_pages_base(args):
+    """Flag, then PAGES_BASE env var (both already in args.pages_base), then the repo config value."""
+    return args.pages_base or config_pages_base()
+
 
 def media_url(pages_base, file):
     """Built exactly as publish.publish builds it."""
@@ -329,16 +352,17 @@ def wait_for_pages(url, expected_type, *, fetch_fn=fetch, clock=None, sleep=time
 def confirm(args, clock=None, fetch_fn=fetch, sleep=time.sleep):
     clock = clock or (lambda: datetime.now(timezone.utc))
     entry = json.loads(Path(args.entry).read_text(encoding="utf-8"))
-    if not args.pages_base:
-        raise Refused("--pages-base is needed (or set the PAGES_BASE env var)")
-    if not args.pages_base.startswith("https://"):
+    pages_base = resolve_pages_base(args)
+    if not pages_base:
+        raise Refused("--pages-base is needed (or set the PAGES_BASE env var, or pages_base in pages_config.json)")
+    if not pages_base.startswith("https://"):
         raise Refused("--pages-base must be an https address")
     ext = Path(entry["file"]).suffix
     if ext not in MEDIA_TYPES:
         raise Refused(f"cannot tell the content type for {entry['file']}")
     margin = CONFIRM_MARGIN + timedelta(minutes=max(0, args.extra_margin_minutes))
     due = parse_utc(entry["publish_at"])
-    url = media_url(args.pages_base, entry["file"])
+    url = media_url(pages_base, entry["file"])
     confirmed = wait_for_pages(url, MEDIA_TYPES[ext][1], fetch_fn=fetch_fn, clock=clock, sleep=sleep,
                                every=args.poll_seconds, max_wait=timedelta(minutes=args.max_wait_minutes))
     print(f"CONFIRMED {url} answered 200 {MEDIA_TYPES[ext][1]} at {fmt_utc(confirmed)}")
@@ -365,14 +389,14 @@ def parser():
     m.add_argument("--slug", help="name part of the entry file (default: the media name)")
     m.add_argument("--post-check", default=os.environ.get("POST_CHECK"), help="path to the house post_check script (default: POST_CHECK env var)")
     m.add_argument("--no-post-check", action="store_true", help="dry run only: skip post_check (refused together with --write)")
-    m.add_argument("--pages-base", default=os.environ.get("PAGES_BASE"), help="https://<user>.github.io/<repo>/ (default: PAGES_BASE env var)")
+    m.add_argument("--pages-base", default=os.environ.get("PAGES_BASE"), help="https://<user>.github.io/<repo>/ (default: PAGES_BASE env var, then pages_config.json)")
     m.add_argument("--extra-margin-minutes", type=int, default=0, help="add to the margin; it cannot be lowered")
     m.add_argument("--poll-seconds", type=int, default=POLL_EVERY)
     m.add_argument("--max-wait-minutes", type=int, default=int(POLL_MAX.total_seconds() // 60))
     m.add_argument("--write", action="store_true", help="copy and write, but only after post_check passes and Pages serves the media; without it nothing changes")
     c = sub.add_parser("confirm", help="after the push: wait for Pages, then check the post time")
     c.add_argument("entry", help="the queue entry JSON")
-    c.add_argument("--pages-base", default=os.environ.get("PAGES_BASE"), help="https://<user>.github.io/<repo>/ (default: PAGES_BASE env var)")
+    c.add_argument("--pages-base", default=os.environ.get("PAGES_BASE"), help="https://<user>.github.io/<repo>/ (default: PAGES_BASE env var, then pages_config.json)")
     c.add_argument("--extra-margin-minutes", type=int, default=0, help="add to the margin; it cannot be lowered")
     c.add_argument("--poll-seconds", type=int, default=POLL_EVERY)
     c.add_argument("--max-wait-minutes", type=int, default=int(POLL_MAX.total_seconds() // 60))
@@ -380,6 +404,7 @@ def parser():
 
 
 def main(argv=None):
+    sys.stdout.reconfigure(encoding="utf-8")
     args = parser().parse_args(argv)
     try:
         (make if args.cmd == "make" else confirm)(args)

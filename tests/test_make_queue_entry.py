@@ -573,6 +573,7 @@ def test_dry_run_does_not_poll(work, monkeypatch):
 
 def test_write_without_any_pages_base_refused(work, monkeypatch):
     monkeypatch.delenv("PAGES_BASE")
+    monkeypatch.setattr(mqe, "CONFIG_PATH", work / "no-such-config.json")  # the repo config would otherwise supply a base
     with pytest.raises(mqe.Refused, match="--pages-base"):
         run_make(work, write=True)
     assert not (work / "q").exists()
