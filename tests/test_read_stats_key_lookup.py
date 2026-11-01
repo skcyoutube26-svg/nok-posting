@@ -25,9 +25,15 @@ case "$1 $2" in
     while [ $# -gt 0 ]; do
       [ "$1" = -inkey ] && echo "$2" >> "$USED_LOG"
       [ "$1" = -out ] && echo x > "$2"
+      case "$1" in -in|-out|-pass) echo "$2" >> "$ARGS_LOG" ;; esac
       shift
     done ;;
-  *) echo '{"ok": 1}' ;;
+  *)
+    while [ $# -gt 0 ]; do
+      case "$1" in -in|-pass) echo "$2" >> "$ARGS_LOG" ;; esac
+      shift
+    done
+    echo '{"ok": 1}' ;;
 esac
 """
 
@@ -47,10 +53,12 @@ def layout(tmp_path):
     tmp.mkdir()
     log = tmp_path / "used.log"
     log.write_text("")
+    args_log = tmp_path / "args.log"
+    args_log.write_text("")
 
     def run(stats_key=None):
         env = dict(os.environ, PATH=f"{bin_}{os.pathsep}{os.environ['PATH']}",
-                   RUN="1", TMPDIR=str(tmp), USED_LOG=str(log))
+                   RUN="1", TMPDIR=str(tmp), USED_LOG=str(log), ARGS_LOG=str(args_log))
         env.pop("STATS_KEY", None)
         if stats_key is not None:
             env["STATS_KEY"] = str(stats_key)
@@ -58,7 +66,7 @@ def layout(tmp_path):
                            capture_output=True, text=True)
         return p, log.read_text().split(), tmp
 
-    run.parent, run.repo = parent, repo
+    run.parent, run.repo, run.args_log = parent, repo, args_log
     return run
 
 
@@ -109,3 +117,55 @@ def test_temp_files_under_tmpdir_and_cleaned(layout):
     assert p.returncode == 0
     assert list(tmp.iterdir()) == []
     assert not (layout.repo / "insights").exists()
+
+
+def test_openssl_gets_relative_temp_paths(layout):
+    """Windows native openssl cannot open POSIX temp paths, so temp files must be passed relative."""
+    fake_key(layout.parent / ".stats-key.pem")
+    p, _, _ = layout()
+    assert p.returncode == 0, p.stderr
+    args = layout.args_log.read_text().split()
+    assert args, "openssl was never given temp files"
+    for a in args:
+        a = a.removeprefix("file:")
+        assert not a.startswith("/") and ":" not in a and "\\" not in a, a
+
+
+def test_relative_stats_key_still_works(layout, tmp_path):
+    fake_key(tmp_path / "rel.pem")
+    env = dict(os.environ, PATH=f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}", RUN="1",
+               TMPDIR=str(tmp_path / "tmp"), USED_LOG=str(tmp_path / "used.log"),
+               ARGS_LOG=str(layout.args_log), STATS_KEY="rel.pem")
+    p = subprocess.run([SH, str(layout.repo / "tools" / "read_stats.sh")], env=env, cwd=tmp_path,
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+
+
+@pytest.mark.skipif(shutil.which("openssl") is None, reason="needs openssl")
+def test_real_openssl_roundtrip_with_throwaway_key(layout, tmp_path):
+    """Real openssl, throwaway key generated here (never a real key)."""
+    import base64
+    work = tmp_path / "rt"
+    work.mkdir()
+    kw = dict(cwd=work, check=True, capture_output=True)
+    subprocess.run(["openssl", "genpkey", "-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048",
+                    "-out", "priv.pem"], **kw)
+    subprocess.run(["openssl", "pkey", "-in", "priv.pem", "-pubout", "-out", "pub.pem"], **kw)
+    (work / "sym").write_bytes(b"sym-secret-1234567890")
+    (work / "plain").write_text('{"real": 1}')
+    subprocess.run(["openssl", "pkeyutl", "-encrypt", "-pubin", "-inkey", "pub.pem", "-in", "sym",
+                    "-out", "sym.enc"], **kw)
+    subprocess.run(["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-in", "plain", "-out", "d.enc",
+                    "-pass", "file:sym"], **kw)
+    b = lambda n: base64.b64encode((work / n).read_bytes()).decode()
+    gh = tmp_path / "bin" / "gh"
+    gh.write_text(f'#!/bin/sh\ncase "$*" in *"run view"*) echo "KEY:{b("sym.enc")}"; '
+                  f'echo "DATA:{b("d.enc")}" ;; *"run list"*) echo 1 ;; esac\n', newline="\n")
+    (tmp_path / "bin" / "openssl").unlink()
+    key = work / "priv.pem"
+    env = dict(os.environ, PATH=f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}", RUN="1",
+               TMPDIR=str(tmp_path / "tmp"), STATS_KEY=str(key))
+    p = subprocess.run([SH, str(layout.repo / "tools" / "read_stats.sh")], env=env,
+                       capture_output=True, text=True)
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.strip() == '{"real": 1}'
