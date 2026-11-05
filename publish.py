@@ -126,7 +126,9 @@ def run_due(dry):
             continue
         if in_done(f.name):  # another run posted it and its "published" commit reached us (rugs Reel, 3 Oct)
             print(f"SKIP {f.name}: already in done/ (double-post guard)")
-            f.unlink(); continue
+            if not dry:
+                f.unlink()
+            continue
         if not post.get("approved"):
             print(f"SKIP {f.name}: no owner approval recorded"); continue
         if not (ROOT / post["file"]).exists():

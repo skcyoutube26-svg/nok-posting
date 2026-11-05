@@ -45,3 +45,16 @@ def test_entry_already_in_done_is_not_posted(repo, fake_api, capsys):
     assert not [c for c in fake_api.calls if c[0] == "POST"]
     assert not (repo / "queue" / "e.json").exists()
     assert "already in done/" in capsys.readouterr().out
+
+
+def test_catch_all_schedule_present_for_odd_hours():
+    assert re.search(r'^\s*- cron: "\*/(10|15) \* \* \* \*"', YML, re.M)
+
+
+def test_dry_run_keeps_queue_file_that_is_also_in_done(repo, fake_api):
+    post = {"publish_at": "2020-01-01T00:00:00Z", "type": "IMAGE", "file": "media/a.jpg", "caption": "c", "approved": "yes"}
+    (repo / "media" / "a.jpg").write_bytes(b"x")
+    (repo / "queue" / "e.json").write_text(json.dumps(post), encoding="utf-8")
+    (repo / "done" / "e.json").write_text(json.dumps(post), encoding="utf-8")
+    publish.run_due(True)
+    assert (repo / "queue" / "e.json").exists()
