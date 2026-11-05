@@ -41,7 +41,9 @@ class Workflow(unittest.TestCase):
 
     def test_no_new_schedule_and_no_token_expiry_workflow(self):
         on = yaml.safe_load(WF.read_text())[True]
-        self.assertEqual([c["cron"] for c in on["schedule"]], ["*/10 * * * *", "0 3 * * 1"])
+        crons = [c["cron"] for c in on["schedule"]]
+        self.assertEqual(crons[-1], "0 3 * * 1")  # the weekly refresh stays the only weekly entry
+        self.assertEqual(sum(c.endswith("* * 1") for c in crons), 1)
         self.assertFalse((WF.parent / "token-expiry.yml").exists())
 
 

@@ -1,17 +1,28 @@
 name: publish
 on:
   schedule:
-    - cron: "*/10 * * * *"   # publish check; GitHub may start runs 5-20 min late
+    # GitHub throttles scheduled runs (documented: delays at busy times, especially the top of the hour; runs can be dropped).
+    # Seen 2-4 Nov: only ~4 runs a day, 16:00Z Reels started 16:21Z, 18:45Z, 22:42Z. So: many entries just before and after
+    # each slot (13:00, 16:00, 23:00Z), at off-peak minutes. publish.py waits at most 20 min for a post due soon.
+    - cron: "47,57 12 * * *"    # 13:00 slot
+    - cron: "7,17,27,37,47 13 * * *"
+    - cron: "47,57 15 * * *"    # 16:00 slot
+    - cron: "7,17,27,37,47 16 * * *"
+    - cron: "47,57 22 * * *"    # 23:00 slot
+    - cron: "7,17,27,37,47 23 * * *"
+    - cron: "*/10 * * * *"      # catch-all for any other publish_at (0100Z, 1230Z, 1630Z, 1700Z...); the dense lines above add chances at the main slots
     - cron: "0 3 * * 1"      # weekly token refresh
   workflow_dispatch:
 permissions:
   contents: write
-concurrency: publish
+concurrency:
+  group: publish
+  cancel-in-progress: false   # never kill a run mid-post; a waiting run takes over
 jobs:
   publish:
     if: github.event.schedule != '0 3 * * 1'
     runs-on: ubuntu-latest
-    timeout-minutes: 350
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
