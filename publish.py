@@ -74,7 +74,10 @@ def publish(post):
     return mid, ai
 
 
-WAIT_MAX = 5.5 * 3600  # GitHub's cron fires hours apart, so a run waits for posts due within this window (job limit 6 h)
+# A run waits only for posts due within this window. It used to be 5.5 h: those runs held the "publish" concurrency
+# group for hours (and 2-4 Nov two hit the 350 min job limit and were cancelled), so later runs queued behind them.
+# Lateness is now handled by the dense cron entries in publish.yml, not by long sleeps.
+WAIT_MAX = 20 * 60
 
 
 def next_due():
@@ -108,6 +111,11 @@ def already_live(post):
     return False
 
 
+def in_done(name):
+    """True when done/ already holds this entry. Live state of the repo, read at post time, not at run start."""
+    return (ROOT / "done" / name).exists()
+
+
 def run_due(dry):
     now = datetime.now(timezone.utc)
     failed = False
@@ -116,6 +124,9 @@ def run_due(dry):
         due = datetime.fromisoformat(post["publish_at"].replace("Z", "+00:00"))
         if due > now:
             continue
+        if in_done(f.name):  # another run posted it and its "published" commit reached us (rugs Reel, 3 Oct)
+            print(f"SKIP {f.name}: already in done/ (double-post guard)")
+            f.unlink(); continue
         if not post.get("approved"):
             print(f"SKIP {f.name}: no owner approval recorded"); continue
         if not (ROOT / post["file"]).exists():
